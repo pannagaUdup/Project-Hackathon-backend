@@ -43,6 +43,7 @@ AGENTS = [
     {"id": 6, "name": "Kavya Pillai",  "zone": "Central", "initials": "KP", "color": "#f97316", "allocated": 6},
     {"id": 7, "name": "Nikhil Patil",  "zone": "South",   "initials": "NP", "color": "#06b6d4", "allocated": 6},
     {"id": 8, "name": "Divya Sharma",  "zone": "East",    "initials": "DS", "color": "#ec4899", "allocated": 6},
+    {"id": 9, "name": "Divya Sharma",  "zone": "East",    "initials": "DS", "color": "#ec4899", "allocated": 6}
 ]
 
 BORROWERS = [

@@ -1,0 +1,174 @@
+{
+  "total_accounts_analyzed": 62778,
+  "accounts_in_repromise_cycle": 6633,
+  "repromise_rate_pct": 10.57,
+  "severity_distribution": {
+    "MEDIUM": 3718,
+    "HIGH": 2079,
+    "CRITICAL": 836
+  },
+  "avg_cycle_length_days": 51.8,
+  "avg_consecutive_breaks": 3.03,
+  "top_cyclers": [
+    {
+      "ACCOUNT_ID": 2121554,
+      "consecutive_broken_ptps": 23,
+      "days_in_cycle": 129,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 10.79
+    },
+    {
+      "ACCOUNT_ID": 2357047,
+      "consecutive_broken_ptps": 22,
+      "days_in_cycle": 150,
+      "total_promised_in_cycle": 252051.0,
+      "severity": "CRITICAL",
+      "urgency_score": 10.5023
+    },
+    {
+      "ACCOUNT_ID": 2249112,
+      "consecutive_broken_ptps": 22,
+      "days_in_cycle": 79,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 9.89
+    },
+    {
+      "ACCOUNT_ID": 822667,
+      "consecutive_broken_ptps": 22,
+      "days_in_cycle": 74,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 9.84
+    },
+    {
+      "ACCOUNT_ID": 1996611,
+      "consecutive_broken_ptps": 21,
+      "days_in_cycle": 102,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 9.72
+    },
+    {
+      "ACCOUNT_ID": 2903020,
+      "consecutive_broken_ptps": 22,
+      "days_in_cycle": 19,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 9.1991
+    },
+    {
+      "ACCOUNT_ID": 1758831,
+      "consecutive_broken_ptps": 17,
+      "days_in_cycle": 201,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 8.9
+    },
+    {
+      "ACCOUNT_ID": 2344342,
+      "consecutive_broken_ptps": 20,
+      "days_in_cycle": 31,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 8.4433
+    },
+    {
+      "ACCOUNT_ID": 3258816,
+      "consecutive_broken_ptps": 20,
+      "days_in_cycle": 20,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 8.4062
+    },
+    {
+      "ACCOUNT_ID": 2249837,
+      "consecutive_broken_ptps": 17,
+      "days_in_cycle": 134,
+      "total_promised_in_cycle": 212366.0,
+      "severity": "CRITICAL",
+      "urgency_score": 8.365
+    },
+    {
+      "ACCOUNT_ID": 1764911,
+      "consecutive_broken_ptps": 16,
+      "days_in_cycle": 155,
+      "total_promised_in_cycle": 176000.0,
+      "severity": "CRITICAL",
+      "urgency_score": 8.25
+    },
+    {
+      "ACCOUNT_ID": 1325630,
+      "consecutive_broken_ptps": 16,
+      "days_in_cycle": 155,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 8.25
+    },
+    {
+      "ACCOUNT_ID": 2404877,
+      "consecutive_broken_ptps": 18,
+      "days_in_cycle": 68,
+      "total_promised_in_cycle": 97351.0,
+      "severity": "CRITICAL",
+      "urgency_score": 8.1255
+    },
+    {
+      "ACCOUNT_ID": 1800394,
+      "consecutive_broken_ptps": 15,
+      "days_in_cycle": 143,
+      "total_promised_in_cycle": 210000.0,
+      "severity": "CRITICAL",
+      "urgency_score": 7.73
+    },
+    {
+      "ACCOUNT_ID": 2487554,
+      "consecutive_broken_ptps": 16,
+      "days_in_cycle": 80,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 7.5
+    },
+    {
+      "ACCOUNT_ID": 2865227,
+      "consecutive_broken_ptps": 15,
+      "days_in_cycle": 132,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 7.4867
+    },
+    {
+      "ACCOUNT_ID": 2329254,
+      "consecutive_broken_ptps": 17,
+      "days_in_cycle": 52,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 7.4737
+    },
+    {
+      "ACCOUNT_ID": 2303193,
+      "consecutive_broken_ptps": 13,
+      "days_in_cycle": 356,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 7.3
+    },
+    {
+      "ACCOUNT_ID": 652570,
+      "consecutive_broken_ptps": 13,
+      "days_in_cycle": 163,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 7.13
+    },
+    {
+      "ACCOUNT_ID": 2275811,
+      "consecutive_broken_ptps": 12,
+      "days_in_cycle": 347,
+      "total_promised_in_cycle": NaN,
+      "severity": "CRITICAL",
+      "urgency_score": 6.9
+    }
+  ]
+}

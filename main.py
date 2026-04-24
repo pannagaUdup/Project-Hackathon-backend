@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from ptpsense_genai import (
     generate_breach_lines, BreachAnalysisResponse,
     generate_persona, PersonaResponse, TOP_N,
+    generate_recommendation,
 )
 
 # ── Load account_features.csv once at startup ────────────────────────────────
@@ -61,9 +62,9 @@ def _score(a): return a.get("breachScore") or 0
 
 _SEVERITY_BUCKETS = {
     "all":      ACCOUNT_FEATURES,
-    "critical": [a for a in ACCOUNT_FEATURES if _score(a) > 0.75],
-    "high":     [a for a in ACCOUNT_FEATURES if 0.5 <= _score(a) <= 0.75],
-    "low":      [a for a in ACCOUNT_FEATURES if _score(a) < 0.5],
+    "critical": [a for a in ACCOUNT_FEATURES if str(a.get("severity") or "").upper() == "CRITICAL"],
+    "high":     [a for a in ACCOUNT_FEATURES if str(a.get("severity") or "").upper() in ("CYCLER", "INTERVENE")],
+    "low":      [a for a in ACCOUNT_FEATURES if str(a.get("severity") or "").upper() == "STABLE"],
 }
 _SEVERITY_COUNTS = {k: len(v) for k, v in _SEVERITY_BUCKETS.items()}
 
@@ -94,7 +95,7 @@ def _classify_activity(remark: str) -> str:
     if any(k in r for k in ("CALL", "SPOKE", "DISCUSS", "CONTACT")):             return "contact"
     return "other"
 
-def _parse_last3(raw: str):
+# def _parse_last3(raw: str):
     if not raw:
         return []
     try:
@@ -135,6 +136,46 @@ def _parse_last3(raw: str):
             "promisedDate":     promised[i]  if i < len(promised)  and promised[i]  else None,
             "totalOutstanding": total_out,
         })
+    return out
+def _parse_last3(raw: str):
+    if not raw:
+        return []
+
+    try:
+        raw = raw.replace('""', '"')  # fix CSV JSON
+        obj = json.loads(raw)
+    except:
+        return []
+
+    remarks_str = obj.get("last_3_remarks", "")
+
+    ptp_dates = (obj.get("last_3_ptp_date") or "").split(":")
+    promised  = (obj.get("last_3_promised_date") or "").split(":")
+    outstanding_raw = (obj.get("last_3_Total_Outstanding") or "").split("|")
+
+    out = []
+    remarks = remarks_str.split("|")
+
+    for i in range(len(remarks)):
+        entry = remarks[i].strip().rstrip("/").strip()
+        if not entry:
+            continue
+
+        m = _DATE_PREFIX.match(entry)
+        day_hint, remark = (m.group(1), m.group(2).strip()) if m else (None, entry)
+
+        out.append({
+            "index": i + 1,
+            "dayHint": day_hint,
+            "remark": remark,
+            "category": _classify_activity(remark),
+
+            # 🔥 SAFE INDEXING
+            "ptpDate": ptp_dates[i] if i < len(ptp_dates) else None,
+            "promisedDate": promised[i] if i < len(promised) else None,
+            "totalOutstanding": float(outstanding_raw[i]) if i < len(outstanding_raw) and outstanding_raw[i] else None,
+        })
+
     return out
 
 def _load_last3():
@@ -737,7 +778,39 @@ def ptpsense_lifecycle_by_account(account_id: str):
 
 @app.get("/api/ptpsense/cyclers")
 def ptpsense_cyclers():
-    return PTPSENSE_CYCLERS
+    critical = [
+        a for a in ACCOUNT_FEATURES
+        if str(a.get("cyclerSeverity") or "").upper() == "CRITICAL"
+    ]
+    count = len(critical)
+    total_outstanding = sum(float(a.get("outstanding") or 0) for a in critical)
+    avg_repromises = (
+        round(sum(float(a.get("repromiseCount") or 0) for a in critical) / count, 1)
+        if count else 0.0
+    )
+    avg_ptps = (
+        round(sum(float(a.get("totalPtps") or 0) for a in critical) / count, 1)
+        if count else 0.0
+    )
+    avg_fulfilled = (
+        round(sum(float(a.get("ptpsFulfilled") or 0) for a in critical) / count, 1)
+        if count else 0.0
+    )
+    avg_broken = (
+        round(sum(float(a.get("ptpsBroken") or 0) for a in critical) / count, 1)
+        if count else 0.0
+    )
+    return {
+        "summary": {
+            "count":             count,
+            "total_outstanding": round(total_outstanding, 2),
+            "avg_repromises":    avg_repromises,
+            "avg_ptps":          avg_ptps,
+            "avg_fulfilled":     avg_fulfilled,
+            "avg_broken":        avg_broken,
+        },
+        "accounts": critical,
+    }
 
 @app.get("/api/ptpsense/recommendations")
 def ptpsense_rec_accounts():
@@ -763,6 +836,13 @@ def ptpsense_rec_detail(key: str):
 def genai_breach_analysis(account_id: int):
     try:
         return generate_breach_lines(account_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/genai/recommendation/{account_id}")
+def genai_recommendation(account_id: int):
+    try:
+        return generate_recommendation(account_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -929,3 +1009,30 @@ def _strengths_fallback(a):
     elif dpd < 90: s.append(f"Handles mid-DPD range (avg {dpd:.0f}d)")
     else: s.append(f"Takes on difficult high-DPD cases (avg {dpd:.0f}d)")
     return s[:2]
+
+
+# ── Tele-Call Queue ───────────────────────────────────────────────────────────
+
+class TeleCallScoreRequest(BaseModel):
+    account_id: int
+    disposition: str = "PTP"
+
+@app.post("/api/telecall/score")
+def telecall_score(req: TeleCallScoreRequest):
+    """
+    Score a single account's PTP fulfillment probability using the standalone
+    XGBoost scorer.  Pass disposition='PTP' to score, 'NON_PTP' to skip.
+    """
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(__file__))
+    try:
+        from standalone_scorer import score_account
+        return score_account(req.account_id, req.disposition.upper().strip())
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=f"Scorer model/data not found: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

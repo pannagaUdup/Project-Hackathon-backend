@@ -1,0 +1,264 @@
+{
+  "total_ptps_analyzed": 196245,
+  "overall_fulfillment_rate": 0.7129,
+  "overall_breach_rate": 0.2871,
+  "patterns": [
+    {
+      "pattern_id": 1,
+      "name": "Day-of-Week Breach Pattern",
+      "description": "PTPs made on Thursday have the highest breach rate (31.7%), vs Sunday with the lowest (22.5%).",
+      "insight": "Friday promises breach significantly more than other days.",
+      "friday_breach_rate": 0.3014,
+      "other_days_breach_rate": 0.2846,
+      "significance": {
+        "z_stat": -5.873,
+        "p_value": 0.0,
+        "significant": "True"
+      },
+      "breakdown": [
+        {
+          "day_name": "Monday",
+          "total": 31624,
+          "breach_rate": 0.2628699721730331
+        },
+        {
+          "day_name": "Tuesday",
+          "total": 30643,
+          "breach_rate": 0.308031197989753
+        },
+        {
+          "day_name": "Wednesday",
+          "total": 30152,
+          "breach_rate": 0.28037941098434593
+        },
+        {
+          "day_name": "Thursday",
+          "total": 29268,
+          "breach_rate": 0.31676233429000955
+        },
+        {
+          "day_name": "Friday",
+          "total": 29666,
+          "breach_rate": 0.3013550866311603
+        },
+        {
+          "day_name": "Saturday",
+          "total": 29074,
+          "breach_rate": 0.2882300337070922
+        },
+        {
+          "day_name": "Sunday",
+          "total": 15818,
+          "breach_rate": 0.22461752433936022
+        }
+      ]
+    },
+    {
+      "pattern_id": 2,
+      "name": "DPD-Based Breach Pattern",
+      "description": "Current accounts (DPD=0) fulfill promises at 80.7%, while accounts with DPD>90 fulfill at only 38.1%.",
+      "insight": "Delinquency depth is the strongest predictor of breach.",
+      "current_fulfillment_rate": 0.8074,
+      "high_dpd_fulfillment_rate": 0.3811,
+      "significance": {
+        "z_stat": 141.657,
+        "p_value": 0.0,
+        "significant": "True"
+      },
+      "breakdown": [
+        {
+          "dpd_bucket": "0 (Current)",
+          "total": 130983,
+          "fulfilled": 105760,
+          "breach_rate": 0.19256697434018155
+        },
+        {
+          "dpd_bucket": "1-30",
+          "total": 26600,
+          "fulfilled": 16727,
+          "breach_rate": 0.3711654135338346
+        },
+        {
+          "dpd_bucket": "31-60",
+          "total": 8542,
+          "fulfilled": 4994,
+          "breach_rate": 0.41535940060875676
+        },
+        {
+          "dpd_bucket": "61-90",
+          "total": 4616,
+          "fulfilled": 2695,
+          "breach_rate": 0.41616117850953205
+        },
+        {
+          "dpd_bucket": "91-180",
+          "total": 9794,
+          "fulfilled": 5388,
+          "breach_rate": 0.44986726567286095
+        },
+        {
+          "dpd_bucket": "180+",
+          "total": 15710,
+          "fulfilled": 4331,
+          "breach_rate": 0.7243157224697645
+        }
+      ]
+    },
+    {
+      "pattern_id": 3,
+      "name": "Re-Promise Decay Pattern",
+      "description": "First-time PTP accounts fulfill at 52.4%. Accounts with 3+ re-promises fulfill at only 71.4%.",
+      "insight": "Each additional broken promise cycle reduces fulfillment probability significantly.",
+      "first_promise_fulfillment": 0.5241,
+      "chronic_repromise_fulfillment": 0.7142,
+      "significance": {
+        "z_stat": -24.128,
+        "p_value": 0.0,
+        "significant": "True"
+      },
+      "breakdown": [
+        {
+          "repromise_cycle": 0,
+          "total": 3402,
+          "fulfillment_rate": 0.524103468547913,
+          "breach_rate": 0.475896531452087
+        },
+        {
+          "repromise_cycle": 1,
+          "total": 28540,
+          "fulfillment_rate": 0.7070777855641205,
+          "breach_rate": 0.2929222144358795
+        },
+        {
+          "repromise_cycle": 2,
+          "total": 28255,
+          "fulfillment_rate": 0.7348433905503451,
+          "breach_rate": 0.2651566094496549
+        },
+        {
+          "repromise_cycle": 3,
+          "total": 23975,
+          "fulfillment_rate": 0.7368508863399374,
+          "breach_rate": 0.26314911366006255
+        },
+        {
+          "repromise_cycle": 4,
+          "total": 19393,
+          "fulfillment_rate": 0.7224256174908472,
+          "breach_rate": 0.2775743825091528
+        },
+        {
+          "repromise_cycle": 5,
+          "total": 92680,
+          "fulfillment_rate": 0.7066573154941735,
+          "breach_rate": 0.29334268450582646
+        }
+      ]
+    },
+    {
+      "pattern_id": 4,
+      "name": "Contact Channel Breach Pattern",
+      "description": "Call PTPs fulfill at 73.9% vs Field Visit PTPs at 47.7%. Call-based promises are more reliable.",
+      "insight": "Field visits generate higher-quality promises than phone calls.",
+      "call_fulfillment_rate": 0.7394,
+      "visit_fulfillment_rate": 0.4773,
+      "significance": {
+        "z_stat": 77.472,
+        "p_value": 0.0,
+        "significant": "True"
+      },
+      "breakdown": [
+        {
+          "CHANNEL": "Call",
+          "total": 176343,
+          "fulfilled": 130395,
+          "fulfillment_rate": 0.7394396148415304,
+          "breach_rate": 0.2605603851584696
+        },
+        {
+          "CHANNEL": "Visit",
+          "total": 19902,
+          "fulfilled": 9500,
+          "fulfillment_rate": 0.4773389609084514,
+          "breach_rate": 0.5226610390915486
+        }
+      ]
+    },
+    {
+      "pattern_id": 5,
+      "name": "Month-End Promise Pattern",
+      "description": "PTPs made in the last week of the month (day 25+) fulfill at 67.3%, vs 72.0% for mid-month PTPs.",
+      "insight": "Month-end salary timing affects promise quality.",
+      "month_end_fulfillment": 0.6731,
+      "mid_month_fulfillment": 0.7203,
+      "significance": {
+        "z_stat": -16.789,
+        "p_value": 0.0,
+        "significant": "True"
+      },
+      "breakdown": [
+        {
+          "period": "Mid-month",
+          "total": 165448,
+          "fulfillment_rate": 0.720256515642377
+        },
+        {
+          "period": "Month-end (day 25+)",
+          "total": 30797,
+          "fulfillment_rate": 0.67311751144592
+        }
+      ]
+    },
+    {
+      "pattern_id": 6,
+      "name": "Overdue Installment Accumulation Pattern",
+      "description": "Accounts with 0 overdue installments fulfill at 80.8%, dropping to 41.0% for accounts with 3+ overdue.",
+      "insight": "Installment accumulation is a compounding breach signal.",
+      "zero_overdue_fulfillment": 0.8076,
+      "multi_overdue_fulfillment": 0.4101,
+      "significance": {
+        "z_stat": 139.432,
+        "p_value": 0.0,
+        "significant": "True"
+      },
+      "breakdown": [
+        {
+          "overdue_bucket": "0",
+          "total": 130994,
+          "fulfilled": 105785,
+          "fulfillment_rate": 0.8075560712704398,
+          "breach_rate": 0.19244392872956018
+        },
+        {
+          "overdue_bucket": "1",
+          "total": 27287,
+          "fulfilled": 17075,
+          "fulfillment_rate": 0.6257558544361784,
+          "breach_rate": 0.3742441455638216
+        },
+        {
+          "overdue_bucket": "2",
+          "total": 8611,
+          "fulfilled": 4998,
+          "fulfillment_rate": 0.5804203925211938,
+          "breach_rate": 0.4195796074788062
+        },
+        {
+          "overdue_bucket": "3",
+          "total": 4476,
+          "fulfilled": 2561,
+          "fulfillment_rate": 0.5721626452189454,
+          "breach_rate": 0.42783735478105456
+        },
+        {
+          "overdue_bucket": "4+",
+          "total": 24877,
+          "fulfilled": 9476,
+          "fulfillment_rate": 0.38091409735900633,
+          "breach_rate": 0.6190859026409936
+        }
+      ]
+    }
+  ],
+  "pattern_count": 6
+}

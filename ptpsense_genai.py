@@ -92,15 +92,23 @@ class PersonaFeature(BaseModel):
 
 
 class PatternStat(BaseModel):
-    id:          str
-    label:       str
-    top_pct:     float
-    base_pct:    float
-    top_n:       int
-    base_n:      int
-    top_label:   str = "High-fulfillment accounts"
-    base_label:  str = "Overall baseline"
-    insight:     str
+    id:               str
+    label:            str
+    top_pct:          float
+    base_pct:         float
+    top_n:            int
+    base_n:           int
+    top_label:        str = "High-breach accounts"
+    base_label:       str = "Overall baseline"
+    insight:          str
+    # ── fields required by PatternAnalysis.jsx ──────────────────────
+    headline_value:   str = ""
+    headline_color:   str = "red"
+    stat_test:        str = "Chi-square"
+    p_value:          str = ""
+    effect_size_name: str = "Cramér's V"
+    effect_size_val:  str = ""
+    agent_action:     str = ""
 
 
 class PersonaResponse(BaseModel):
@@ -398,7 +406,7 @@ def generate_breach_lines(account_id: int) -> BreachAnalysisResponse:
 
 PERSONA_SYSTEM_PROMPT = """You are PTPSense Persona Engine — builds customer personas for Indian collections.
 
-TASK: Given statistics about high-fulfillment accounts vs baseline, return top 5 distinguishing features.
+TASK: Given statistics about HIGH-BREACH-RISK accounts vs baseline, return top 5 features that DRIVE breach. Use red/amber for chart_color. persona_name should name the risk archetype (e.g. "Serial Re-Promise Breacher").
 
 STRICT RULES:
 1. Output ONLY a raw JSON object — no markdown, no explanation
@@ -421,33 +429,84 @@ RETURN THIS EXACT SHAPE:
 {"persona_name":"...","persona_description":"...","top_5_features":[5 items],"collection_strategy":"..."}"""
 
 
+def _chi2_cramer(top_has: int, top_not: int, base_has: int, base_not: int):
+    """2×2 Chi-square + Cramér's V — no scipy required."""
+    n = top_has + top_not + base_has + base_not
+    if n == 0:
+        return 0.0, 0.0, "n/a"
+    a, b, c, d = top_has, top_not, base_has, base_not
+    r1, r2 = a + b, c + d   # row totals (top group, rest)
+    c1, c2 = a + c, b + d   # col totals (has condition, no condition)
+    if 0 in (r1, r2, c1, c2):
+        return 0.0, 0.0, "n/a"
+    chi2 = n * (a * d - b * c) ** 2 / (r1 * r2 * c1 * c2)
+    v    = (chi2 / n) ** 0.5
+    # Bucketed p-value from chi-square critical values (df = 1)
+    p = "< 0.001" if chi2 > 10.83 else "< 0.01" if chi2 > 6.63 else "< 0.05" if chi2 > 3.84 else "> 0.05"
+    return round(chi2, 2), round(v, 3), p
+
+
 def compute_pattern_stats(df: pd.DataFrame, top: pd.DataFrame) -> list[PatternStat]:
-    def pct(s): return round(float(s.mean()) * 100, 1)
-    def cnt(s): return int(s.sum())
+    """
+    5 binary breach-causing patterns.
+    For each: chi-square test + Cramér's V + comparative avg breach score
+    (accounts WITH condition vs WITHOUT condition across the full dataset).
+    """
+    N   = len(df)
+    TOP = len(top)
+
+    def _pat(pid, label, top_mask, base_mask, color, action):
+        t_has = int(top_mask.sum());   t_not = TOP - t_has
+        b_has = int(base_mask.sum());  b_not = N   - b_has
+        t_pct = round(t_has / TOP * 100, 1) if TOP else 0.0
+        b_pct = round(b_has / N   * 100, 1) if N   else 0.0
+
+        chi2, v, p = _chi2_cramer(t_has, t_not, b_has, b_not)
+
+        ratio    = round(t_pct / b_pct, 1) if b_pct > 0 else 0
+        headline = f"{ratio}x higher rate" if t_pct > b_pct else f"{t_pct}% vs {b_pct}% baseline"
+
+        # Comparative breach score: with vs without the condition (full dataset)
+        score_with    = round(float(df.loc[base_mask,  "risk_score"].mean()), 3) if b_has > 0 else 0.0
+        score_without = round(float(df.loc[~base_mask, "risk_score"].mean()), 3) if b_not > 0 else 0.0
+        insight = (
+            f"{t_pct}% of high-breach vs {b_pct}% baseline — "
+            f"avg breach score {score_with} (with) vs {score_without} (without condition)"
+        )
+
+        return PatternStat(
+            id=pid, label=label,
+            top_pct=t_pct, base_pct=b_pct,
+            top_n=t_has,   base_n=b_has,
+            top_label="High-breach accounts",
+            insight=insight,
+            headline_value=headline,
+            headline_color=color,
+            stat_test="Chi-square",
+            p_value=p,
+            effect_size_name="Cramér's V",
+            effect_size_val=str(v),
+            agent_action=action,
+        )
 
     return [
-        PatternStat(id="P1", label="Weekend promise (Fri–Sun)",
-            top_pct=pct(top["pattern_friday_maker"]), base_pct=pct(df["pattern_friday_maker"]),
-            top_n=cnt(top["pattern_friday_maker"]), base_n=cnt(df["pattern_friday_maker"]),
-            insight=f"{pct(top['pattern_friday_maker'])}% of top vs {pct(df['pattern_friday_maker'])}% baseline — top accounts avoid weekends"),
-        PatternStat(id="P2", label="3rd+ re-promise decay",
-            top_pct=pct(top["pattern_repromise_decay"]), base_pct=pct(df["pattern_repromise_decay"]),
-            top_n=cnt(top["pattern_repromise_decay"]), base_n=cnt(df["pattern_repromise_decay"]),
-            insight=f"{pct(top['pattern_repromise_decay'])}% of top vs {pct(df['pattern_repromise_decay'])}% baseline — first promise success is key"),
-        PatternStat(id="P3", label="Salary-aligned PTP",
-            top_pct=pct(top["salary_credit_detected"]), base_pct=pct(df["salary_credit_detected"]),
-            top_n=cnt(top["salary_credit_detected"]), base_n=cnt(df["salary_credit_detected"]),
-            insight=f"{pct(top['salary_credit_detected'])}% of top vs {pct(df['salary_credit_detected'])}% baseline — salary alignment boosts fulfillment"),
-        PatternStat(id="P4", label="Low overdue installments",
-            top_pct=round(100-pct(top["pattern_multi_overdue"]),1), base_pct=round(100-pct(df["pattern_multi_overdue"]),1),
-            top_n=len(top)-cnt(top["pattern_multi_overdue"]), base_n=len(df)-cnt(df["pattern_multi_overdue"]),
-            insight=f"Clean installment history predicts fulfillment — {round(100-pct(top['pattern_multi_overdue']),1)}% vs {round(100-pct(df['pattern_multi_overdue']),1)}% baseline"),
-        PatternStat(id="P5", label="Low contact pressure (≤3 calls)",
-            top_pct=round(100-(top["contact_attempts_before_ptp"]>=4).mean()*100,1),
-            base_pct=round(100-(df["contact_attempts_before_ptp"]>=4).mean()*100,1),
-            top_n=int((top["contact_attempts_before_ptp"]<4).sum()),
-            base_n=int((df["contact_attempts_before_ptp"]<4).sum()),
-            insight=f"Genuine promises need less pressure — {round(100-(top['contact_attempts_before_ptp']>=4).mean()*100,1)}% low-pressure vs {round(100-(df['contact_attempts_before_ptp']>=4).mean()*100,1)}% baseline"),
+        _pat("P1", "High DPD (> 60 days)",
+             top["DPD"] > 60, df["DPD"] > 60,
+             "red",   "Prioritise before 90 DPD — offer settlement window"),
+        _pat("P2", "Re-promise cycler (≥ 3 broken PTPs)",
+             top["consecutive_broken_ptps"] >= 3, df["consecutive_broken_ptps"] >= 3,
+             "red",   "Block new PTPs — require partial payment first"),
+        _pat("P3", "Low fulfillment history (< 30%)",
+             top["historical_fulfillment_rate"] < 0.3, df["historical_fulfillment_rate"] < 0.3,
+             "red",   "Field visit escalation — phone-only strategy is failing"),
+        _pat("P4", "NPA or overdue burden (> 50%)",
+             (top["NPA_FLAG"] == 1) | (top["overdue_ratio"] > 0.5),
+             (df["NPA_FLAG"]  == 1) | (df["overdue_ratio"]  > 0.5),
+             "amber", "Refer to NPA recovery desk — standard escalation protocol"),
+        _pat("P5", "No salary credit detected",
+             top["salary_credit_detected"] == False,
+             df["salary_credit_detected"]  == False,
+             "amber", "Wait for salary window before calling — improves connect rate"),
     ]
 
 
@@ -466,52 +525,60 @@ def compute_feature_summary(df: pd.DataFrame, top: pd.DataFrame) -> dict:
         "baseline_dpd":              round(float(df["DPD"].mean()), 1),
         "baseline_overdue_ratio":    round(float(df["overdue_ratio"].mean()), 3),
         "baseline_risk_score":       round(float(df["risk_score"].mean()), 3),
+        # breach-context extras used by persona_fallback
+        "pct_cycler":                round(float((top["consecutive_broken_ptps"] >= 3).mean())*100, 1),
+        "baseline_pct_salary":       round(float(df["salary_credit_detected"].mean())*100, 1),
         "total_top": len(top), "total_all": len(df),
     }
 
 
 def persona_fallback(ps: list[PatternStat], fs: dict) -> dict:
+    baseline_sal = fs.get("baseline_pct_salary", 31.4)
     return {
-        "persona_name": "Reliable First-Promise Payer",
+        "persona_name": "Serial Re-Promise Breacher",
         "persona_description": (
-            f"Top {fs['total_top']} accounts by fulfillment probability — "
-            f"avg DPD {fs['avg_dpd']} days vs {fs['baseline_dpd']} baseline, "
-            f"zero broken PTPs in {fs['pct_zero_broken']}% of cases."
+            f"Top {fs['total_top']} highest-risk accounts — "
+            f"avg DPD {fs['avg_dpd']}d vs {fs['baseline_dpd']}d baseline, "
+            f"{fs.get('pct_cycler', 0)}% are re-promise cyclers."
         ),
         "top_5_features": [
-            {"rank":1,"feature_name":"DPD (Days Past Due)","top_value":f"{fs['avg_dpd']} days",
-             "baseline_value":f"{fs['baseline_dpd']} days",
-             "difference":f"{round((fs['avg_dpd']-fs['baseline_dpd'])/(fs['baseline_dpd']+0.001)*100,1)}%",
-             "why_it_matters":"Low DPD accounts fulfill first promise 5x more often.",
-             "chart_color":"green"},
-            {"rank":2,"feature_name":"Consecutive Broken PTPs","top_value":f"{fs['avg_consecutive_broken']}",
-             "baseline_value":"0.52","difference":"-100%",
-             "why_it_matters":"Zero broken promises — not a cycler.",
-             "chart_color":"green"},
-            {"rank":3,"feature_name":"Salary Credit Detected","top_value":f"{fs['pct_salary_detected']}%",
-             "baseline_value":"31.4%","difference":f"+{round(fs['pct_salary_detected']-31.4,1)}%",
-             "why_it_matters":"Salary-aligned promises fulfill 1.8x more often.",
-             "chart_color":"green"},
-            {"rank":4,"feature_name":"Risk Score","top_value":f"{fs['avg_risk_score']}",
-             "baseline_value":f"{fs['baseline_risk_score']}",
-             "difference":f"{round((fs['avg_risk_score']-fs['baseline_risk_score'])/(fs['baseline_risk_score']+0.001)*100,1)}%",
-             "why_it_matters":"All breach signals absent — model confirms low risk.",
-             "chart_color":"green"},
-            {"rank":5,"feature_name":"Re-promise Decay","top_value":f"{ps[1].top_pct}%",
-             "baseline_value":f"{ps[1].base_pct}%",
-             "difference":f"{round(ps[1].top_pct-ps[1].base_pct,1)}%",
-             "why_it_matters":"First call succeeds — no re-promise cycle needed.",
-             "chart_color":"green"},
+            {"rank":1,"feature_name":"DPD (Days Past Due)",
+             "top_value":f"{fs['avg_dpd']}d","baseline_value":f"{fs['baseline_dpd']}d",
+             "difference":f"+{round(fs['avg_dpd']-fs['baseline_dpd'],1)}d",
+             "why_it_matters":"High DPD is the #1 predictor of breach.",
+             "chart_color":"red"},
+            {"rank":2,"feature_name":"Consecutive Broken PTPs",
+             "top_value":f"{fs['avg_consecutive_broken']}","baseline_value":"0.52",
+             "difference":f"+{round(fs['avg_consecutive_broken']-0.52,2)}",
+             "why_it_matters":"Re-promise cycle active — first promise already failed.",
+             "chart_color":"red"},
+            {"rank":3,"feature_name":"Overdue Ratio",
+             "top_value":f"{round(fs['avg_overdue_ratio']*100,1)}%",
+             "baseline_value":f"{round(fs['baseline_overdue_ratio']*100,1)}%",
+             "difference":f"+{round((fs['avg_overdue_ratio']-fs['baseline_overdue_ratio'])*100,1)}%",
+             "why_it_matters":"Heavy overdue burden signals inability to pay.",
+             "chart_color":"red"},
+            {"rank":4,"feature_name":"Risk Score",
+             "top_value":f"{fs['avg_risk_score']}","baseline_value":f"{fs['baseline_risk_score']}",
+             "difference":f"+{round(fs['avg_risk_score']-fs['baseline_risk_score'],3)}",
+             "why_it_matters":"Model confirms all breach signals are active.",
+             "chart_color":"red"},
+            {"rank":5,"feature_name":"Salary Credit Absent",
+             "top_value":f"{round(100-fs['pct_salary_detected'],1)}%",
+             "baseline_value":f"{round(100-baseline_sal,1)}%",
+             "difference":f"+{round((100-fs['pct_salary_detected'])-(100-baseline_sal),1)}%",
+             "why_it_matters":"No income signal — contact window unreliable.",
+             "chart_color":"amber"},
         ],
         "collection_strategy": (
-            "One clear call is enough — do not over-contact. "
-            "Schedule confirmation 48h before due date. "
-            "Avoid pressure tactics; they trigger avoidance in this persona."
+            "Stop issuing new PTPs without partial payment. "
+            "Escalate cyclers (≥3 broken) to TL or field visit. "
+            "Trigger salary-window call for accounts with recent credit activity."
         ),
     }
 
 
-_persona_cache = None
+_persona_cache = None   # cleared on every server restart — breach-focus recomputed fresh
 
 def generate_persona(top_n: int = TOP_N) -> PersonaResponse:
     """
@@ -523,15 +590,15 @@ def generate_persona(top_n: int = TOP_N) -> PersonaResponse:
         return _persona_cache
 
     df  = get_df()
-    top = df.nlargest(top_n, "last_fulfillment_prob")
-    log.info(f"Persona: selected top {top_n} accounts")
+    top = df.nlargest(top_n, "risk_score")   # HIGH-BREACH accounts
+    log.info(f"Persona: selected top {top_n} highest-risk accounts")
 
     ps = compute_pattern_stats(df, top)
     fs = compute_feature_summary(df, top)
 
     try:
         payload = {"pattern_stats": [s.model_dump() for s in ps], "feature_summary": fs}
-        user_msg = "Build the high-fulfillment persona. Return JSON only.\n\n" + json.dumps(payload, default=str)
+        user_msg = "Build the high-breach-risk persona. Return JSON only.\n\n" + json.dumps(payload, default=str)
         raw = call_bedrock(PERSONA_SYSTEM_PROMPT, user_msg, max_tokens=1000)
         source = "claude"
     except Exception as e:
@@ -620,6 +687,188 @@ def api_health():
         "tiers":            df["risk_tier"].value_counts().to_dict(),
         "bedrock_configured": bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK")),
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  MODULE 3 — PER-ACCOUNT COLLECTION RECOMMENDATIONS
+# ═════════════════════════════════════════════════════════════════════════════
+
+RECOMMENDATION_SYSTEM_PROMPT = """You are PTPSense — a collections strategy AI for Indian lending.
+
+TASK: Given one account's risk data, return exactly 3 ranked actionable collection recommendations for the agent.
+
+STRICT RULES:
+1. Output ONLY a raw JSON object — no markdown, no explanation
+2. "acts" must be EXACTLY 3 items, ranked by confidence (highest first)
+3. Each action: "t" = title (max 10 words, imperative verb), "c" = "High"/"Medium"/"Low", "r" = reason (max 20 words, cite account data), "b" = basis (cited stats, max 8 words)
+4. ONLY use numbers from the input — never invent
+5. Actions must be specific and operational for an Indian collections agent
+6. Use Indian collections terms: DPD, TL escalation, PTP, settlement, salary window, field visit, cycler
+
+ANTI-HALLUCINATION:
+- Every number must appear in the input
+- Do not reference fields that are absent or zero unless explicitly relevant
+
+RETURN THIS EXACT SHAPE:
+{"acts":[{"t":"...","c":"High","r":"...","b":"..."},{"t":"...","c":"Medium","r":"...","b":"..."},{"t":"...","c":"Low","r":"...","b":"..."}]}"""
+
+
+def _build_rec_payload(row: pd.Series) -> dict:
+    raw_breach = safe(row, "breach_signals", "")
+    breach_list = [s.strip() for s in str(raw_breach).split("|") if s.strip() and str(raw_breach) != "nan"]
+
+    drivers = []
+    for i in range(1, 4):
+        f = safe(row, f"top_driver_{i}")
+        d = safe(row, f"top_driver_{i}_dir")
+        if f and str(f) != "nan":
+            drivers.append({"feature": feat_label(str(f)), "direction": str(d)})
+
+    return {
+        "account_id":                 int(row["ACCOUNT_ID"]),
+        "risk_tier":                  str(safe(row, "risk_tier", "STABLE")),
+        "risk_score":                 round(float(safe(row, "risk_score", 0.5)), 4),
+        "dpd":                        int(safe(row, "DPD", 0)),
+        "total_outstanding_inr":      round(float(safe(row, "TOTAL_OUTSTANDING_AMOUNT", 0))),
+        "total_ptps":                 int(safe(row, "total_ptps", 0)),
+        "ptps_broken":                int(safe(row, "ptps_broken", 0)),
+        "historical_fulfillment_rate":round(float(safe(row, "historical_fulfillment_rate", 0)), 3),
+        "consecutive_broken_ptps":    int(safe(row, "consecutive_broken_ptps", 0)),
+        "repromise_count":            int(safe(row, "repromise_count", 0)),
+        "cycler_severity":            str(safe(row, "cycler_severity", "LOW")),
+        "overdue_ratio":              round(float(safe(row, "overdue_ratio", 0)), 3),
+        "npa_flag":                   int(safe(row, "NPA_FLAG", 0)),
+        "cheque_bounce":              int(safe(row, "CHEQUE_BOUNCE_FLAG", 0)),
+        "salary_credit_detected":     bool(safe(row, "salary_credit_detected", False)),
+        "upi_activity_last_30d":      int(safe(row, "upi_activity_last_30d", 0)),
+        "days_since_last_payment":    int(safe(row, "days_since_last_payment", 0)),
+        "breach_signals":             breach_list[:3],
+        "top_drivers":                drivers,
+    }
+
+
+def _rec_fallback(p: dict) -> dict:
+    """Rule-based recommendations — used when Bedrock is unavailable."""
+    tier = p["risk_tier"]
+    dpd  = p["dpd"]
+    cbp  = p["consecutive_broken_ptps"]
+    fr   = round(p["historical_fulfillment_rate"] * 100)
+    outs = int(p["total_outstanding_inr"])
+
+    if tier == "CRITICAL":
+        return {"acts": [
+            {"t": "Escalate to TL — offer settlement window",
+             "c": "High",
+             "r": f"DPD {dpd} with {cbp} consecutive broken PTPs — standard follow-up ineffective.",
+             "b": f"DPD {dpd} · {cbp} broken PTPs"},
+            {"t": "Block new PTPs — require partial payment first",
+             "c": "High",
+             "r": f"Fulfillment rate {fr}% indicates PTP issuance is not converting to payments.",
+             "b": f"Fulfillment rate {fr}%"},
+            {"t": "Schedule field visit if no response in 48h",
+             "c": "Medium",
+             "r": f"Outstanding ₹{outs:,} warrants in-person escalation after phone failure.",
+             "b": f"Outstanding ₹{outs:,}"},
+        ]}
+    elif tier == "CYCLER":
+        return {"acts": [
+            {"t": "Stop accepting new promises — demand partial payment",
+             "c": "High",
+             "r": f"{cbp} consecutive broken PTPs — cycler pattern, promises carry no weight.",
+             "b": f"{cbp} broken PTPs · cycler CRITICAL"},
+            {"t": "Engage guarantor or co-borrower immediately",
+             "c": "High",
+             "r": f"Primary contact unresponsive across {cbp} promise cycles.",
+             "b": f"Repromise count {p['repromise_count']}"},
+            {"t": "Offer structured settlement with reduced penalty",
+             "c": "Medium",
+             "r": f"DPD {dpd} approaching NPA — settlement may recover more than legal route.",
+             "b": f"DPD {dpd} · outstanding ₹{outs:,}"},
+        ]}
+    elif tier == "INTERVENE":
+        return {"acts": [
+            {"t": "Call today with structured payment offer",
+             "c": "High",
+             "r": f"DPD {dpd} in intervention window — structured offer now prevents escalation.",
+             "b": f"DPD {dpd} · risk score {p['risk_score']:.2f}"},
+            {"t": "Set PTP with mandatory follow-up call in 48h",
+             "c": "Medium",
+             "r": f"Fulfillment rate {fr}% — follow-up call doubles PTP success rate.",
+             "b": f"Fulfillment rate {fr}%"},
+            {"t": "Align call to salary credit window",
+             "c": "Low",
+             "r": "Calls timed to salary credit increase payment likelihood significantly.",
+             "b": "Salary window alignment"},
+        ]}
+    else:  # STABLE
+        return {"acts": [
+            {"t": "Standard follow-up — confirm payment on due date",
+             "c": "High",
+             "r": f"Account is stable with DPD {dpd}. Monitor and confirm commitment.",
+             "b": f"DPD {dpd} · STABLE tier"},
+            {"t": "Send payment reminder 48h before due date",
+             "c": "Medium",
+             "r": "Early reminder reduces late-payment risk for accounts with active PTPs.",
+             "b": "Due date proximity"},
+            {"t": "Re-engage immediately if due date is missed",
+             "c": "Low",
+             "r": f"Fulfillment rate {fr}% — prompt re-engagement prevents DPD escalation.",
+             "b": f"Fulfillment rate {fr}%"},
+        ]}
+
+
+# Color lookup by confidence tier
+_REC_COLORS = {
+    "High":   {"bc": "var(--green-s)", "bd": "var(--green-b)", "bf": "var(--green)", "cc": "var(--green)"},
+    "Medium": {"bc": "var(--amber-s)", "bd": "var(--amber-b)", "bf": "var(--amber)", "cc": "var(--amber)"},
+    "Low":    {"bc": "var(--bg3)",     "bd": "var(--border)",  "bf": "var(--hint)",  "cc": "var(--hint)"},
+}
+
+
+def _enrich_acts(raw: dict) -> dict:
+    """Inject CSS color fields so the frontend RecDetail component can render without extra logic."""
+    acts = raw.get("acts", [])
+    enriched = []
+    for a in acts[:3]:
+        conf = a.get("c", "Low")
+        colors = _REC_COLORS.get(conf, _REC_COLORS["Low"])
+        enriched.append({**a, **colors})
+    # Pad to 3 if LLM returned fewer
+    while len(enriched) < 3:
+        colors = _REC_COLORS["Low"]
+        enriched.append({"t": "Review account history", "c": "Low", "r": "Insufficient data for a specific recommendation.", "b": "—", **colors})
+    return {"acts": enriched}
+
+
+_rec_cache: dict = {}
+
+def generate_recommendation(account_id: int) -> dict:
+    """
+    Returns 3 ranked collection recommendations for one account.
+    Uses Claude via Bedrock; falls back to rule-based if unavailable.
+    """
+    ck = str(account_id)
+    if ck in _rec_cache:
+        return _rec_cache[ck]
+
+    row = get_account(account_id)
+    payload = _build_rec_payload(row)
+
+    try:
+        user_msg = "Generate 3 collection recommendations. Return JSON only.\n\n" + json.dumps(payload, default=str)
+        raw = call_bedrock(RECOMMENDATION_SYSTEM_PROMPT, user_msg, max_tokens=500)
+        source = "claude"
+    except Exception as e:
+        log.warning(f"Bedrock recommendation failed for {account_id}: {e}, using fallback")
+        raw = _rec_fallback(payload)
+        source = "fallback"
+
+    result = _enrich_acts(raw)
+    result["account_id"] = account_id
+    result["source"] = source
+
+    _rec_cache[ck] = result
+    return result
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -4,7 +4,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import csv
 import os
-from ptpsense_genai import generate_breach_lines, BreachAnalysisResponse
+import json
+import re
+from datetime import datetime, timedelta
+from ptpsense_genai import (
+    generate_breach_lines, BreachAnalysisResponse,
+    generate_persona, PersonaResponse, TOP_N,
+)
 
 # ── Load account_features.csv once at startup ────────────────────────────────
 _CSV_PATH = os.path.join(os.path.dirname(__file__), "database", "account_features.csv")
@@ -14,6 +20,7 @@ _PTP_COLUMNS = [
     ("PRODUCT_CODE",              "product"),
     ("DPD",                       "dpd"),
     ("TOTAL_OUTSTANDING_AMOUNT",  "outstanding"),
+    ("DUE_DATE",                  "dueDate"),
     ("total_ptps",                "totalPtps"),
     ("ptps_fulfilled",            "ptpsFulfilled"),
     ("ptps_broken",               "ptpsBroken"),
@@ -48,6 +55,169 @@ def _load_account_features():
     return rows
 
 ACCOUNT_FEATURES = _load_account_features()
+
+# Pre-computed severity buckets (thresholds on risk_score / breachScore)
+def _score(a): return a.get("breachScore") or 0
+
+_SEVERITY_BUCKETS = {
+    "all":      ACCOUNT_FEATURES,
+    "critical": [a for a in ACCOUNT_FEATURES if _score(a) > 0.75],
+    "high":     [a for a in ACCOUNT_FEATURES if 0.5 <= _score(a) <= 0.75],
+    "low":      [a for a in ACCOUNT_FEATURES if _score(a) < 0.5],
+}
+_SEVERITY_COUNTS = {k: len(v) for k, v in _SEVERITY_BUCKETS.items()}
+
+def _parse_due(s):
+    if not s: return None
+    try:
+        return datetime.strptime(str(s)[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            return datetime.strptime(str(s)[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
+
+def _due_before(account, cutoff: datetime) -> bool:
+    d = _parse_due(account.get("dueDate"))
+    return d is not None and d <= cutoff
+
+# ── Last-3 activity (per-account agent call dispositions) ────────────────────
+_LAST3_BY_ID = {}
+_DATE_PREFIX = re.compile(r"^(\d{1,2})-\s*(.*)")
+
+def _classify_activity(remark: str) -> str:
+    r = remark.upper()
+    if any(k in r for k in ("PAID", "PAYMENT", "RECEIVED", "CREDIT")):         return "payment"
+    if any(k in r for k in ("PTP", "PROMIS", "WILL PAY", "COMMIT", "PLEDGE")):  return "promise"
+    if any(k in r for k in ("MAINTAIN", "BALANCE", "AUTO DEBIT", "NACH")):      return "auto_debit"
+    if "VISIT" in r or "RESIDEN" in r:                                           return "visit"
+    if any(k in r for k in ("CALL", "SPOKE", "DISCUSS", "CONTACT")):             return "contact"
+    return "other"
+
+def _parse_last3(raw: str):
+    if not raw:
+        return []
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(obj, dict):
+        return []
+    remarks_str = obj.get("last_3_remarks", "")
+    if not remarks_str:
+        return []
+
+    ptp_dates = [d.strip() for d in obj.get("last_3_ptp_date", "").split(":")]
+    promised  = [d.strip() for d in obj.get("last_3_promised_date", "").split(":")]
+    outstanding_raw = [v.strip() for v in obj.get("last_3_Total_Outstanding", "").split("|")]
+
+    out = []
+    for i, entry in enumerate(remarks_str.split("|")):
+        text = entry.strip().rstrip("/").strip()
+        if not text:
+            continue
+        m = _DATE_PREFIX.match(text)
+        day_hint, remark = (m.group(1), m.group(2).strip()) if m else (None, text)
+
+        total_out = None
+        if i < len(outstanding_raw) and outstanding_raw[i]:
+            try:
+                total_out = float(outstanding_raw[i])
+            except ValueError:
+                pass
+
+        out.append({
+            "index":            i + 1,
+            "dayHint":          day_hint,
+            "remark":           remark,
+            "category":         _classify_activity(remark),
+            "ptpDate":          ptp_dates[i] if i < len(ptp_dates) and ptp_dates[i] else None,
+            "promisedDate":     promised[i]  if i < len(promised)  and promised[i]  else None,
+            "totalOutstanding": total_out,
+        })
+    return out
+
+def _load_last3():
+    with open(_CSV_PATH, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            parsed = _parse_last3(row.get("last_3_activity", ""))
+            if parsed:
+                _LAST3_BY_ID[row["ACCOUNT_ID"]] = parsed
+
+_load_last3()
+
+# ── Agent coaching data (coaching_agent_data.csv) ────────────────────────────
+_COACHING_CSV = os.path.join(os.path.dirname(__file__), "database", "coaching_agent_data.csv")
+COACHING_AGENTS = []
+COACHING_AGENTS_BY_ID = {}
+# Language-pattern aggregates: {tier: {"unigrams": [(word, count),...], "bigrams": [...], "total_words": N}}
+LANGUAGE_PATTERNS = {}
+
+_STOPWORDS = set("""a an and as at be been but by cm cus customer for from had has have he her him his i if
+in is it its me my not of on or our she so some such that the their them then there these they this
+to was we were what when which who will with would you your said says say ask asked tell told said
+today tomorrow yesterday day date month week time very also being""".split())
+
+def _tokenize(text: str):
+    import re as _re
+    text = _re.sub(r"[^A-Za-z ]+", " ", (text or "").lower())
+    return [w for w in text.split() if len(w) >= 3 and w not in _STOPWORDS]
+
+def _parse_agent_last3(raw: str) -> list[str]:
+    """Returns just the remark strings for language analysis."""
+    if not raw: return []
+    try: obj = json.loads(raw)
+    except (json.JSONDecodeError, TypeError): return []
+    if not isinstance(obj, dict): return []
+    remarks = obj.get("last_3_remarks", "") or ""
+    return [r.strip().rstrip("/").strip() for r in remarks.split("|") if r.strip()]
+
+def _load_agents():
+    from collections import Counter
+    tier_tokens = {"Top Quartile": [], "Mid": [], "Bottom Quartile": []}
+    tier_bigrams = {"Top Quartile": [], "Mid": [], "Bottom Quartile": []}
+
+    with open(_COACHING_CSV, newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            agent = {
+                "agentId":         _parse(r.get("AGENT_ID", "")),
+                "totalPtps":       _parse(r.get("total_ptps", "")),
+                "fulfilled":       _parse(r.get("fulfilled", "")),
+                "fulfillmentRate": _parse(r.get("fulfillment_rate", "")),
+                "avgDpd":          _parse(r.get("avg_dpd", "")),
+                "repromiseRate":   _parse(r.get("repromise_rate", "")),
+                "visitRate":       _parse(r.get("visit_rate", "")),
+                "remarksCount":    _parse(r.get("remarks_count", "")),
+                "tier":            r.get("tier", "").strip() or "Mid",
+                "tierInsight":     r.get("tier_insight", "").strip(),
+                "recentActivities": _parse_last3(r.get("last_3_activity", "")),
+            }
+            COACHING_AGENTS.append(agent)
+            COACHING_AGENTS_BY_ID[str(agent["agentId"])] = agent
+
+            # Collect language tokens keyed by tier
+            remarks = _parse_agent_last3(r.get("last_3_activity", ""))
+            t = agent["tier"] if agent["tier"] in tier_tokens else "Mid"
+            for rem in remarks:
+                toks = _tokenize(rem)
+                tier_tokens[t].extend(toks)
+                tier_bigrams[t].extend(" ".join(pair) for pair in zip(toks, toks[1:]))
+
+    # Rank by fulfillment_rate (desc) for leaderboard
+    COACHING_AGENTS.sort(key=lambda x: (-(x["fulfillmentRate"] or 0), x["avgDpd"] or 999))
+
+    # Pre-compute top phrases per tier (top 15 unigrams + 10 bigrams)
+    for t in tier_tokens:
+        c_uni = Counter(tier_tokens[t])
+        c_bi  = Counter(tier_bigrams[t])
+        LANGUAGE_PATTERNS[t] = {
+            "unigrams":   [{"term": w, "count": c} for w, c in c_uni.most_common(15)],
+            "bigrams":    [{"term": w, "count": c} for w, c in c_bi.most_common(10)],
+            "totalWords": sum(c_uni.values()),
+            "agentCount": sum(1 for a in COACHING_AGENTS if a["tier"] == t),
+        }
+
+_load_agents()
 
 app = FastAPI()
 
@@ -504,19 +674,44 @@ def ptpsense_accounts():
     return PTPSENSE_ACCOUNTS
 
 @app.get("/api/ptpsense/accounts-v2")
-def ptpsense_accounts_paginated(page: int = 1, page_size: int = 10):
+def ptpsense_accounts_paginated(
+    page: int = 1,
+    page_size: int = 10,
+    severity: str = "all",
+    due_within_48h: bool = False,
+):
     if page < 1: page = 1
     if page_size < 1 or page_size > 100: page_size = 10
-    total = len(ACCOUNT_FEATURES)
+    bucket = _SEVERITY_BUCKETS.get(severity, _SEVERITY_BUCKETS["all"])
+    if due_within_48h:
+        cutoff = datetime.now() + timedelta(hours=48)
+        bucket = [a for a in bucket if _due_before(a, cutoff)]
+    total = len(bucket)
     start = (page - 1) * page_size
     end = start + page_size
+    items = []
+    for a in bucket[start:end]:
+        row = dict(a)
+        acts = _LAST3_BY_ID.get(str(a["accountId"]))
+        row["lastActivity"] = acts[0] if acts else None
+        items.append(row)
     return {
-        "items": ACCOUNT_FEATURES[start:end],
+        "items": items,
         "total": total,
         "page": page,
         "pageSize": page_size,
         "totalPages": (total + page_size - 1) // page_size,
+        "severity": severity if severity in _SEVERITY_BUCKETS else "all",
+        "dueWithin48h": due_within_48h,
+        "counts": _SEVERITY_COUNTS,
     }
+
+@app.get("/api/ptpsense/urgent-count")
+def ptpsense_urgent_count():
+    """Count of CRITICAL accounts whose due date is within next 48 hours (or already overdue)."""
+    cutoff = datetime.now() + timedelta(hours=48)
+    count = sum(1 for a in _SEVERITY_BUCKETS["critical"] if _due_before(a, cutoff))
+    return {"count": count, "severity": "critical", "withinHours": 48}
 
 @app.get("/api/ptpsense/breach-alerts")
 def ptpsense_breach_alerts():
@@ -570,3 +765,167 @@ def genai_breach_analysis(account_id: int):
         return generate_breach_lines(account_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/genai/persona", response_model=PersonaResponse)
+def genai_persona(top_n: int = TOP_N):
+    return generate_persona(top_n)
+
+@app.get("/api/genai/last-activity/{account_id}")
+def genai_last_activity(account_id: str):
+    activities = _LAST3_BY_ID.get(str(account_id))
+    if not activities:
+        raise HTTPException(status_code=404, detail=f"No recent activity for account '{account_id}'")
+    return {"account_id": account_id, "count": len(activities), "activities": activities}
+
+# ── Agent Coaching endpoints ─────────────────────────────────────────────────
+
+@app.get("/api/coaching/agents")
+def coaching_agents(page: int = 1, page_size: int = 20, tier: str = "all"):
+    if page < 1: page = 1
+    if page_size < 1 or page_size > 100: page_size = 20
+    pool = COACHING_AGENTS if tier == "all" else [a for a in COACHING_AGENTS if a["tier"].lower() == tier.lower()]
+    total = len(pool)
+    start = (page - 1) * page_size
+    items = [{k: v for k, v in a.items() if k not in ("tierInsight", "recentActivities")}
+             for a in pool[start:start + page_size]]
+    return {
+        "items": items, "total": total, "page": page, "pageSize": page_size,
+        "totalPages": (total + page_size - 1) // page_size,
+        "summary": {
+            "topQuartile":    sum(1 for a in COACHING_AGENTS if a["tier"] == "Top Quartile"),
+            "mid":            sum(1 for a in COACHING_AGENTS if a["tier"] == "Mid"),
+            "bottomQuartile": sum(1 for a in COACHING_AGENTS if a["tier"] == "Bottom Quartile"),
+            "avgFulfillment": round(sum(a["fulfillmentRate"] or 0 for a in COACHING_AGENTS) / len(COACHING_AGENTS), 4) if COACHING_AGENTS else 0,
+        },
+    }
+
+@app.get("/api/coaching/agents/{agent_id}")
+def coaching_agent_detail(agent_id: str):
+    a = COACHING_AGENTS_BY_ID.get(str(agent_id))
+    if not a:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    return a
+
+@app.get("/api/coaching/language-patterns")
+def coaching_language_patterns():
+    """Returns top words/bigrams per tier, plus phrases distinctive to Top vs Bottom quartile."""
+    top = LANGUAGE_PATTERNS.get("Top Quartile", {})
+    bot = LANGUAGE_PATTERNS.get("Bottom Quartile", {})
+    # Compute distinctive: words appearing much more in Top vs Bottom (by rate)
+    def _rate_map(bucket):
+        total = bucket.get("totalWords", 1) or 1
+        return {u["term"]: u["count"] / total for u in bucket.get("unigrams", [])}
+    top_rate, bot_rate = _rate_map(top), _rate_map(bot)
+    all_terms = set(top_rate) | set(bot_rate)
+    diff = []
+    for term in all_terms:
+        tr, br = top_rate.get(term, 0), bot_rate.get(term, 0)
+        if tr + br >= 0.002:  # only count if reasonably frequent
+            diff.append({"term": term, "topRate": round(tr * 1000, 2), "bottomRate": round(br * 1000, 2),
+                         "delta": round((tr - br) * 1000, 2)})
+    diff.sort(key=lambda x: x["delta"], reverse=True)
+    return {
+        "tiers": LANGUAGE_PATTERNS,
+        "distinctiveTop":    diff[:8],
+        "distinctiveBottom": diff[-8:][::-1],
+    }
+
+class CoachingResponse(BaseModel):
+    agent_id:        str
+    tier:            str
+    fulfillment:     float
+    recommendations: list[str]
+    strengths:       list[str]
+    source:          str
+
+_coaching_cache: dict = {}
+
+@app.get("/api/coaching/recommendations/{agent_id}", response_model=CoachingResponse)
+def coaching_recommendations(agent_id: str):
+    """3-point LLM-generated coaching brief for an agent (focused on bottom-quartile)."""
+    a = COACHING_AGENTS_BY_ID.get(str(agent_id))
+    if not a:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    if agent_id in _coaching_cache:
+        return _coaching_cache[agent_id]
+
+    payload = {
+        "agent_id":         str(a["agentId"]),
+        "tier":             a["tier"],
+        "fulfillment_rate": a["fulfillmentRate"],
+        "total_ptps":       a["totalPtps"],
+        "fulfilled":        a["fulfilled"],
+        "avg_dpd":          a["avgDpd"],
+        "repromise_rate":   a["repromiseRate"],
+        "visit_rate":       a["visitRate"],
+        "tier_insight":     a["tierInsight"],
+        "sample_remarks":   [r["remark"] for r in (a["recentActivities"] or [])[:3]],
+        "top_quartile_top_phrases":    [u["term"] for u in LANGUAGE_PATTERNS.get("Top Quartile", {}).get("unigrams", [])[:10]],
+        "bottom_quartile_top_phrases": [u["term"] for u in LANGUAGE_PATTERNS.get("Bottom Quartile", {}).get("unigrams", [])[:10]],
+    }
+
+    system = """You are a collections-agent coach. Given an agent's PTP performance metrics, tier insight, and sample call remarks, produce a structured JSON coaching brief.
+STRICT RULES:
+1. Output ONLY raw JSON — no markdown, no preface.
+2. "recommendations" must be EXACTLY 3 strings, each max 22 words, each a concrete action the agent can take tomorrow.
+3. "strengths" = 2 short strings (max 15 words each) — what this agent already does well.
+4. Use plain Indian collections terms (DPD, PTP, NACH, TL escalation, salary window, settlement).
+5. For Bottom Quartile agents: focus on what distinguishes Top-tier language/behaviour from theirs.
+6. Never invent numbers — only cite what's in the payload.
+RETURN: {"recommendations":["..","..",".."],"strengths":["..",".."]}"""
+
+    try:
+        from ptpsense_genai import call_bedrock
+        raw = call_bedrock(system, "Generate the coaching brief.\n\n" + json.dumps(payload, default=str), max_tokens=500)
+        recs = (raw.get("recommendations") or [])[:3]
+        strengths = (raw.get("strengths") or [])[:2]
+        source = "claude"
+    except Exception:
+        recs, strengths, source = _coaching_fallback(a), _strengths_fallback(a), "fallback"
+
+    # Enforce exactly 3 + 2
+    while len(recs) < 3: recs.append("Review top-quartile call recordings for language patterns.")
+    while len(strengths) < 2: strengths.append("Engaged with account remarks regularly.")
+
+    resp = CoachingResponse(
+        agent_id=str(a["agentId"]), tier=a["tier"],
+        fulfillment=a["fulfillmentRate"] or 0,
+        recommendations=recs[:3], strengths=strengths[:2], source=source,
+    )
+    _coaching_cache[agent_id] = resp
+    return resp
+
+def _coaching_fallback(a):
+    tier = a["tier"]
+    fr = (a["fulfillmentRate"] or 0) * 100
+    dpd = a["avgDpd"] or 0
+    rep = (a["repromiseRate"] or 0) * 100
+    if tier == "Bottom Quartile":
+        return [
+            f"Fulfillment rate is {fr:.0f}% — target +15pt by offering salary-window calls in next 10 days before issuing a new PTP.",
+            f"Re-promise rate {rep:.0f}% is high — require a partial ₹ before accepting a 2nd PTP from any account.",
+            "Study 3 top-quartile agents' remarks: they confirm specific dates/amounts and log outcome within 24h.",
+        ]
+    if tier == "Mid":
+        return [
+            "Shadow a top-quartile agent for 1 day — note their objection-handling phrases.",
+            f"Your avg DPD {dpd:.0f} is close to cohort — push for earlier-DPD queues to lift fulfillment.",
+            "Cut pressure PTPs: do not log a PTP after >3 contact attempts in a single day.",
+        ]
+    return [
+        "Mentor 2 bottom-quartile peers weekly — share your opening and close-out scripts.",
+        f"Fulfillment {fr:.0f}% is elite — request harder cohorts (higher DPD) to scale impact.",
+        "Document your best 3 language patterns for the coaching library.",
+    ]
+
+def _strengths_fallback(a):
+    fr = (a["fulfillmentRate"] or 0) * 100
+    dpd = a["avgDpd"] or 0
+    s = []
+    if fr >= 80: s.append(f"Excellent fulfillment rate ({fr:.0f}%)")
+    elif fr >= 50: s.append(f"Steady fulfillment ({fr:.0f}%)")
+    else: s.append(f"Consistent engagement — {a['totalPtps']} PTPs logged")
+    if dpd < 30: s.append(f"Works clean early-DPD accounts (avg {dpd:.0f}d)")
+    elif dpd < 90: s.append(f"Handles mid-DPD range (avg {dpd:.0f}d)")
+    else: s.append(f"Takes on difficult high-DPD cases (avg {dpd:.0f}d)")
+    return s[:2]

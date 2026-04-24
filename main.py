@@ -1,6 +1,53 @@
 from models import Product
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import csv
+import os
+from ptpsense_genai import generate_breach_lines, BreachAnalysisResponse
+
+# ── Load account_features.csv once at startup ────────────────────────────────
+_CSV_PATH = os.path.join(os.path.dirname(__file__), "database", "account_features.csv")
+_PTP_COLUMNS = [
+    ("ACCOUNT_ID",                "accountId"),
+    ("CUSTOMER_ID",               "customerId"),
+    ("PRODUCT_CODE",              "product"),
+    ("DPD",                       "dpd"),
+    ("TOTAL_OUTSTANDING_AMOUNT",  "outstanding"),
+    ("total_ptps",                "totalPtps"),
+    ("ptps_fulfilled",            "ptpsFulfilled"),
+    ("ptps_broken",               "ptpsBroken"),
+    ("repromise_count",           "repromiseCount"),
+    ("last_ptp_date",             "lastPtpDate"),
+    ("last_ptp_outcome_label",    "lastPtpOutcome"),
+    ("historical_fulfillment_rate", "fulfillmentRate"),
+    ("risk_score",                "breachScore"),
+    ("risk_tier",                 "severity"),
+    ("cycler_severity",           "cyclerSeverity"),
+]
+
+def _parse(value: str):
+    if value is None or value == "":
+        return None
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
+
+def _load_account_features():
+    rows = []
+    with open(_CSV_PATH, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            item = {}
+            for src, dst in _PTP_COLUMNS:
+                item[dst] = _parse(r.get(src, ""))
+            rows.append(item)
+    return rows
+
+ACCOUNT_FEATURES = _load_account_features()
 
 app = FastAPI()
 
@@ -364,9 +411,10 @@ PTPSENSE_REC_ACCOUNTS = [
     {"id": "ACC-0991", "name": "Meera Pillai", "score": 0.28, "meta": "ACC-0991 · Personal Loan · DPD 15", "key": "meera"},
 ]
 
-PTPSENSE_REC_DATA = {
-    "deepak": {
-        "name": "Deepak Menon", "meta": "ACC-1204 · Personal Loan · DPD 58 · 3 re-promises",
+PTPSENSE_RECOMMENDATIONS = [
+    {
+        "key": "deepak", "accountId": "ACC-0342",
+        "name": "Deepak Menon", "meta": "ACC-0342 · Personal Loan · DPD 58 · 3 re-promises",
         "score": 0.79, "col": "var(--amber)",
         "shap": [
             {"n": "3rd re-promise (P2 pattern)",        "v": 88, "neg": False, "d": "↑ risk"},
@@ -386,7 +434,8 @@ PTPSENSE_REC_DATA = {
             {"t": "Escalate to Team Lead if no response in 48h",    "c": "62%", "cc": "var(--sub)",   "r": "After 3 re-promises and salary-window lapse, agent-level calls have only 18% success rate. TL-level calls on similar profiles recover 41% of accounts.", "b": "Based on 312 TL escalations on 3rd re-promise accounts", "bc": "var(--bg4)", "bf": "var(--hint)", "bd": "var(--border2)"},
         ],
     },
-    "anita": {
+    {
+        "key": "anita", "accountId": "ACC-0567",
         "name": "Anita Joshi", "meta": "ACC-0567 · Credit Card · DPD 34 · 1 re-promise",
         "score": 0.77, "col": "var(--amber)",
         "shap": [
@@ -405,7 +454,8 @@ PTPSENSE_REC_DATA = {
             {"t": "Partial ask: ₹20K now vs ₹42K full amount",   "c": "65%", "cc": "var(--amber)", "r": "P5 pattern (pressure PTP) — the full-amount promise was likely coerced. Smaller ask = higher follow-through on low-DPD accounts.", "b": "Based on 876 partial-ask outcomes in 30–45 DPD", "bc": "var(--amber-s)", "bf": "var(--amber)", "bd": "var(--amber-b)"},
         ],
     },
-    "suresh": {
+    {
+        "key": "suresh", "accountId": "ACC-2301",
         "name": "Suresh Kumar", "meta": "ACC-2301 · Personal Loan · DPD 22 · 2 re-promises",
         "score": 0.71, "col": "var(--amber)",
         "shap": [
@@ -423,7 +473,8 @@ PTPSENSE_REC_DATA = {
             {"t": "Send SMS with specific payment date",         "c": "58%", "cc": "var(--sub)",   "r": 'Implementation intention nudge — "When your salary arrives on Apr 24, pay ₹5,000 immediately." Specific plans increase follow-through 34% vs generic reminders.', "b": "Based on 1,100 nudge A/B test outcomes", "bc": "var(--bg4)", "bf": "var(--hint)", "bd": "var(--border2)"},
         ],
     },
-    "meera": {
+    {
+        "key": "meera", "accountId": "ACC-0991",
         "name": "Meera Pillai", "meta": "ACC-0991 · Personal Loan · DPD 15 · 1 active PTP",
         "score": 0.28, "col": "var(--green)",
         "shap": [
@@ -441,7 +492,10 @@ PTPSENSE_REC_DATA = {
             {"t": "Confirmation SMS 2 days before due date only",    "c": "74%", "cc": "var(--teal)", "r": "A single gentle reminder 48h before due date increases on-time payment by 12% without triggering avoidance behaviour.", "b": "Based on 1,800 reminder timing experiments", "bc": "var(--teal-s)", "bf": "var(--teal)", "bd": "var(--teal-b)"},
         ],
     },
-}
+]
+
+class AccountLookupRequest(BaseModel):
+    accountId: str
 
 # ── PTPSense endpoints ────────────────────────────────────────────────────────
 
@@ -449,13 +503,42 @@ PTPSENSE_REC_DATA = {
 def ptpsense_accounts():
     return PTPSENSE_ACCOUNTS
 
+@app.get("/api/ptpsense/accounts-v2")
+def ptpsense_accounts_paginated(page: int = 1, page_size: int = 10):
+    if page < 1: page = 1
+    if page_size < 1 or page_size > 100: page_size = 10
+    total = len(ACCOUNT_FEATURES)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "items": ACCOUNT_FEATURES[start:end],
+        "total": total,
+        "page": page,
+        "pageSize": page_size,
+        "totalPages": (total + page_size - 1) // page_size,
+    }
+
 @app.get("/api/ptpsense/breach-alerts")
 def ptpsense_breach_alerts():
     return PTPSENSE_BREACH_CARDS
 
+@app.get("/api/ptpsense/breach-alerts/{account_id}")
+def ptpsense_breach_alert_by_account(account_id: str):
+    card = next((c for c in PTPSENSE_BREACH_CARDS if c["id"] == account_id), None)
+    if card is None:
+        raise HTTPException(status_code=404, detail=f"No breach alert for account '{account_id}'")
+    return card
+
 @app.get("/api/ptpsense/lifecycle")
 def ptpsense_lifecycle():
     return PTPSENSE_LIFECYCLE
+
+@app.get("/api/ptpsense/lifecycle/{account_id}")
+def ptpsense_lifecycle_by_account(account_id: str):
+    rec = next((r for r in PTPSENSE_LIFECYCLE if r["id"] == account_id), None)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"No lifecycle data for account '{account_id}'")
+    return rec
 
 @app.get("/api/ptpsense/cyclers")
 def ptpsense_cyclers():
@@ -465,8 +548,25 @@ def ptpsense_cyclers():
 def ptpsense_rec_accounts():
     return PTPSENSE_REC_ACCOUNTS
 
+@app.post("/api/ptpsense/recommendations/by-account")
+def ptpsense_rec_by_account(body: AccountLookupRequest):
+    rec = next((r for r in PTPSENSE_RECOMMENDATIONS if r["accountId"] == body.accountId), None)
+    if rec is None:
+        raise HTTPException(status_code=404, detail=f"No recommendation data for '{body.accountId}'")
+    return rec
+
 @app.get("/api/ptpsense/recommendations/{key}")
 def ptpsense_rec_detail(key: str):
-    if key not in PTPSENSE_REC_DATA:
+    rec = next((r for r in PTPSENSE_RECOMMENDATIONS if r["key"] == key), None)
+    if rec is None:
         raise HTTPException(status_code=404, detail=f"Recommendation key '{key}' not found")
-    return PTPSENSE_REC_DATA[key]
+    return rec
+
+# ── GenAI breach analysis (delegates to ptpsense_genai module) ────────────────
+
+@app.get("/api/genai/breach-analysis/{account_id}", response_model=BreachAnalysisResponse)
+def genai_breach_analysis(account_id: int):
+    try:
+        return generate_breach_lines(account_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
